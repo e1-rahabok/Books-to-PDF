@@ -18,8 +18,7 @@ Word's temporary lock files (`~$*.docx`) are ignored. The window stays open at t
 
 After converting, the script runs `Upload PDFs To Vercel.ps1`, which uploads each PDF to the `isvara-media` Vercel Blob store as `downloads/<name>.pdf`:
 
-- A PDF is uploaded only if it isn't in the store yet, or if the local file is newer than the copy in the store. So a failed upload is retried on the next run.
-- An upload replaces the existing file in place, and the URL stays the same. The CDN cache is set to 60 seconds, so readers get the new version within a minute.
+- Every book PDF is uploaded on each run and replaces the file with the same name, so the URL stays the same. The CDN cache is set to 60 seconds, so readers get the new version within a minute.
 - You can run `Upload PDFs To Vercel.ps1` on its own to upload without converting.
 
 ### Credential setup (one time)
