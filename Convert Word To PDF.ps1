@@ -134,4 +134,12 @@ foreach ($file in $wordFiles) {
 
 Write-Host ""
 Write-Host "All documents processed successfully." -ForegroundColor Cyan
+Write-Host ""
+
+# Upload new or changed PDFs to the Vercel Blob store
+try {
+    & (Join-Path $PSScriptRoot "Upload PDFs To Vercel.ps1") -PdfFolderPath $pdfFolderPath -BookNames $wordFiles.BaseName
+} catch {
+    Wait-AndExit 1
+}
 Wait-AndExit 0
