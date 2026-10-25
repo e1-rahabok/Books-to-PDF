@@ -18,7 +18,9 @@ Word's temporary lock files (`~$*.docx`) are ignored. The window stays open at t
 
 After converting, the script runs `Upload PDFs To Vercel.ps1`, which uploads each PDF to the `isvara-media` Vercel Blob store as `downloads/<name>.pdf`:
 
-- Every book PDF is uploaded on each run and replaces the file with the same name, so the URL stays the same. The CDN cache is set to 60 seconds, so readers get the new version within a minute.
+- Only PDFs whose content changed since their last upload are uploaded. The script compares a SHA-256 hash of each PDF with the hash saved after its last upload. Unchanged PDFs are listed as `Unchanged` and skipped.
+- An uploaded PDF replaces the file with the same name, so the URL stays the same. The CDN cache is set to 60 seconds, so readers get the new version within a minute.
+- The hashes are saved to `%USERPROFILE%\.secrets\vercel-upload-state.json`. Delete that file to upload everything again.
 - You can run `Upload PDFs To Vercel.ps1` on its own to upload without converting.
 
 ### Credential setup (one time)
@@ -44,10 +46,27 @@ Edit the two variables at the top of the script to change them.
 - Windows with Microsoft Word installed
 - Windows PowerShell 5.1 (built in) or PowerShell 7
 
+## Graphical window
+
+`Convert Word To PDF GUI.ps1` does the same work as the console script, in a window instead:
+
+- **Documents bar:** how many of the Word files are done or skipped.
+- **Current file bar:** shows that Word is busy. Word does not report a percentage.
+- **Elapsed time** for the current file or upload.
+- **Log:** every skip, success, error and upload result, with timestamps.
+
+Closing the window during a run asks for confirmation. It then stops the job and the Word instance it started.
+
 ## Running it
 
-- **Desktop icon:** double-click **Books to PDF** on the desktop.
-- **Manually:**
+- **Desktop icon:** double-click **Books to PDF** on the desktop. It opens the progress window with no console. Run `.\Create Desktop Shortcut.ps1` once to create or update it.
+- **Window:**
+
+  ```powershell
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Convert Word To PDF GUI.ps1"
+  ```
+
+- **Manually (console):**
 
   ```powershell
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Convert Word To PDF.ps1"
