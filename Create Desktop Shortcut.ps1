@@ -7,7 +7,7 @@ $shortcut = $shell.CreateShortcut((Join-Path $desktop "Books to PDF.lnk"))
 $shortcut.TargetPath       = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $shortcut.Arguments        = "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$script`""
 $shortcut.WorkingDirectory = $PSScriptRoot
-$shortcut.IconLocation     = "$env:SystemRoot\System32\imageres.dll,2"
+$shortcut.IconLocation     = Join-Path $PSScriptRoot "Books to PDF.ico"
 $shortcut.Description      = "Convert The Guide Word documents to PDF (progress window)"
 $shortcut.Save()
 
