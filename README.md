@@ -44,10 +44,27 @@ Edit the two variables at the top of the script to change them.
 - Windows with Microsoft Word installed
 - Windows PowerShell 5.1 (built in) or PowerShell 7
 
+## Graphical window
+
+`Convert Word To PDF GUI.ps1` does the same work as the console script, in a window instead:
+
+- **Documents bar:** how many of the Word files are done or skipped.
+- **Current file bar:** shows that Word is busy. Word does not report a percentage.
+- **Elapsed time** for the current file or upload.
+- **Log:** every skip, success, error and upload result, with timestamps.
+
+Closing the window during a run asks for confirmation. It then stops the job and the Word instance it started.
+
 ## Running it
 
-- **Desktop icon:** double-click **Books to PDF** on the desktop.
-- **Manually:**
+- **Desktop icon:** double-click **Books to PDF** on the desktop (console version).
+- **Window:**
+
+  ```powershell
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Convert Word To PDF GUI.ps1"
+  ```
+
+- **Manually (console):**
 
   ```powershell
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Convert Word To PDF.ps1"
