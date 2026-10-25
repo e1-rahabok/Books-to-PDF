@@ -1,18 +1,41 @@
 # Graphical version of "Convert Word To PDF.ps1".
-# Same conversion, hang detection and Vercel upload, shown in a dark window with progress ring, bars and a log.
+# Same conversion, hang detection and Vercel upload, shown in a dark window with a Start button,
+# one status row per document and a log. Nothing runs until Start is pressed.
 # Runs in Windows PowerShell 5.1 (powershell.exe), which starts in STA mode as WinForms needs.
+# -Demo runs the window on fake data (see "Demo Fake Jobs.ps1"): nothing is converted or uploaded.
+param([switch]$Demo)
 
 # Define the folder paths
 $wordFolderPath   = "C:\Users\iwan rahabok\Box\Private Cloud Management\The Guide\Editable format"
 $pdfFolderPath    = "C:\Users\iwan rahabok\Box\Private Cloud Management\The Guide"
 $uploadScript     = Join-Path $PSScriptRoot "Upload PDFs To Vercel.ps1"
+$iconPath         = Join-Path $PSScriptRoot "Books to PDF.ico"
 $hangLimitSeconds = 45   # Word at 0% CPU for this long is treated as hung
+$maxRows          = 5    # the window has room for this many document rows
+$errorLog         = Join-Path $env:TEMP "BooksToPDF-error.log"   # unexpected errors are written here
+$lastRunFile      = Join-Path $env:LOCALAPPDATA "BooksToPDF\last-run.txt"   # when the last run finished
+
+if ($Demo) {
+    . (Join-Path $PSScriptRoot "Demo Fake Jobs.ps1")
+    Reset-DemoFolders
+    $lastRunFile   = Join-Path $demoRoot "last-run.txt"
+    $wordFolderPath = $demoWordFolder
+    $pdfFolderPath  = $demoPdfFolder
+}
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# Plain WinForms cannot draw rounded corners, gradients or a progress ring, so the look is built here.
+# Errors thrown in window events go to the error log instead of the .NET crash dialog.
+# Must be set before any window control is created.
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($source, $e)
+    Write-ErrorReport $e.Exception
+})
+
+# Plain WinForms cannot draw rounded corners or gradients, so the look is built here.
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
 using System;
 using System.Drawing;
@@ -95,63 +118,6 @@ public class Card : Panel {
     }
 }
 
-// Circular progress with a big number in the middle
-public class Ring : Control {
-    int max = 100;
-    int val;
-    string caption = "";
-    string subCaption = "";
-
-    public Ring() {
-        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true);
-        BackColor = Color.Transparent;
-    }
-
-    public int Maximum { get { return max; } set { max = Math.Max(1, value); Invalidate(); } }
-    public int Value { get { return val; } set { val = Math.Max(0, Math.Min(max, value)); Invalidate(); } }
-    public string Caption { get { return caption; } set { caption = value; Invalidate(); } }
-    public string SubCaption { get { return subCaption; } set { subCaption = value; Invalidate(); } }
-
-    protected override void OnPaint(PaintEventArgs e) {
-        Graphics g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-
-        float thick = 14;
-        float size = Math.Min(Width, Height) - 20;
-        RectangleF arc = new RectangleF((Width - size) / 2f + thick / 2f, (Height - size) / 2f + thick / 2f, size - thick, size - thick);
-
-        using (Pen track = new Pen(Theme.Track, thick)) {
-            g.DrawEllipse(track, arc);
-        }
-
-        float sweep = 360f * val / max;
-        if (sweep > 0.5f) {
-            using (Pen glow = new Pen(Color.FromArgb(70, Theme.Accent), thick + 10)) {
-                glow.StartCap = LineCap.Round;
-                glow.EndCap = LineCap.Round;
-                g.DrawArc(glow, arc, -90, sweep);
-            }
-            using (LinearGradientBrush lb = new LinearGradientBrush(new PointF(0, 0), new PointF(Width, Height), Theme.Accent2, Theme.Accent))
-            using (Pen p = new Pen(lb, thick)) {
-                p.StartCap = LineCap.Round;
-                p.EndCap = LineCap.Round;
-                g.DrawArc(p, arc, -90, sweep);
-            }
-        }
-
-        using (Font big = new Font("Segoe UI Variable Display", 28f, FontStyle.Bold))
-        using (Font small = new Font("Segoe UI", 10f))
-        using (SolidBrush text = new SolidBrush(Theme.Text))
-        using (SolidBrush muted = new SolidBrush(Theme.Muted))
-        using (StringFormat sf = new StringFormat()) {
-            sf.Alignment = StringAlignment.Center;
-            sf.LineAlignment = StringAlignment.Center;
-            g.DrawString(caption, big, text, new RectangleF(0, Height * 0.22f, Width, Height * 0.4f), sf);
-            g.DrawString(subCaption, small, muted, new RectangleF(0, Height * 0.58f, Width, Height * 0.2f), sf);
-        }
-    }
-}
-
 // Rounded progress bar. Marquee mode slides a highlight back and forth, for steps without a percentage.
 public class GradientBar : Control {
     int max = 100;
@@ -209,7 +175,7 @@ public class GradientBar : Control {
     }
 }
 
-// Pill-shaped gradient button with a hover highlight
+// Pill-shaped gradient button with a hover highlight. Greyed out while disabled.
 public class PillButton : Control {
     bool hover;
 
@@ -222,20 +188,23 @@ public class PillButton : Control {
 
     protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
 
     protected override void OnPaint(PaintEventArgs e) {
         Graphics g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
+        Color from = !Enabled ? Theme.Track : (hover ? Theme.Accent2 : Theme.Accent);
+        Color to   = !Enabled ? Theme.Track : (hover ? Color.FromArgb(170, 225, 255) : Theme.Accent2);
+        Color text = Enabled ? ForeColor : Theme.Muted;
+
         using (GraphicsPath p = Theme.RoundRect(new RectangleF(0, 0, Width - 1, Height - 1), Height / 2f))
-        using (LinearGradientBrush lb = new LinearGradientBrush(new PointF(0, 0), new PointF(Width, 0),
-                   hover ? Theme.Accent2 : Theme.Accent,
-                   hover ? Color.FromArgb(170, 225, 255) : Theme.Accent2)) {
+        using (LinearGradientBrush lb = new LinearGradientBrush(new PointF(0, 0), new PointF(Width, 0), from, to)) {
             g.FillPath(lb, p);
         }
 
         using (Font f = new Font("Segoe UI Semibold", 10.5f))
-        using (SolidBrush tb = new SolidBrush(ForeColor))
+        using (SolidBrush tb = new SolidBrush(text))
         using (StringFormat sf = new StringFormat()) {
             sf.Alignment = StringAlignment.Center;
             sf.LineAlignment = StringAlignment.Center;
@@ -284,8 +253,13 @@ $script:lastSample  = $null
 $script:lastCpu     = $null
 $script:idleSeconds = 0
 $script:wordPid     = $null
+$script:currentRow  = -1         # row of the document being rendered
 $script:currentName = ""
 $script:currentPdf  = ""
+$script:uploadName  = ""         # PDF base name the upload is working on now
+$script:rowLabels   = @()        # status text per document row
+$script:rowInfo     = @()        # size and last modified line per document row
+$script:rowBars     = @()        # progress bar per document row
 
 # ---------- Window ----------
 
@@ -301,64 +275,82 @@ function New-Label($parent, $text, $x, $y, $width, $height, $font, $color) {
 }
 
 $fontSection = New-Object System.Drawing.Font("Segoe UI Semibold", 8.5)
-$fontFile    = New-Object System.Drawing.Font("Segoe UI Semibold", 12)
+$fontRow     = New-Object System.Drawing.Font("Segoe UI Semibold", 11)
+$fontStatus  = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
 
 $form = New-Object AppForm
-$form.Text            = "Books to PDF"
+$form.Text            = "Vercel Update"
 $form.Font            = New-Object System.Drawing.Font("Segoe UI", 9.5)
-$form.ClientSize      = New-Object System.Drawing.Size(460, 712)
+$form.ClientSize      = New-Object System.Drawing.Size(780, 868)
 $form.StartPosition   = "CenterScreen"
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox     = $false
+if (Test-Path $iconPath) { $form.Icon = New-Object System.Drawing.Icon($iconPath) }
 
 # Header
-$lblTitle    = New-Label $form "Books to PDF" 28 20 400 36 (New-Object System.Drawing.Font("Segoe UI Variable Display", 18, [System.Drawing.FontStyle]::Bold)) ([Theme]::Text)
-$lblSubtitle = New-Label $form "The Guide  -  Word to PDF" 28 58 400 22 $null ([Theme]::Muted)
+$lblTitle    = New-Label $form "Vercel Update" 28 18 500 36 (New-Object System.Drawing.Font("Segoe UI Variable Display", 18, [System.Drawing.FontStyle]::Bold)) ([Theme]::Text)
+$lblSubtitle = New-Label $form "Microsoft Word -> PDF -> Upload to Vercel" 28 56 500 22 $null ([Theme]::Muted)
+$lblLastRun  = New-Label $form "" 28 84 724 20 $null ([Theme]::Muted)
+$lblStatus   = New-Label $form "" 28 104 724 20 $null ([Theme]::Muted)
 
-# Overall progress ring
-$ring = New-Object Ring
-$ring.SetBounds(130, 96, 200, 200)
-$ring.Maximum = [math]::Max($script:total, 1)
-$form.Controls.Add($ring)
+$btnStart = New-Object PillButton
+$btnStart.Text = "Start"
+$btnStart.SetBounds(420, 800, 160, 44)
+$btnStart.Add_Click({
+    try { Start-Run } catch { Write-ErrorReport $_.Exception }
+})
+$form.Controls.Add($btnStart)
 
-# Current step card
-$cardCurrent = New-Object Card
-$cardCurrent.SetBounds(24, 320, 412, 124)
-$form.Controls.Add($cardCurrent)
+# Document list: one row per slot, slots beyond the number of files stay empty
+$cardFiles = New-Object Card
+$cardFiles.SetBounds(24, 130, 732, 380)
+$form.Controls.Add($cardFiles)
 
-$lblSection1 = New-Label $cardCurrent "CURRENT FILE" 20 14 200 20 $fontSection ([Theme]::Muted)
-$lblBadge    = New-Label $cardCurrent "READY" 252 14 140 20 $fontSection ([Theme]::Muted)
-$lblBadge.TextAlign = "MiddleRight"
-$lblCurrent  = New-Label $cardCurrent "Starting..." 20 38 372 26 $fontFile ([Theme]::Text)
+$lblSection1 = New-Label $cardFiles "DOCUMENTS" 20 14 200 20 $fontSection ([Theme]::Muted)
+$lblCount    = New-Label $cardFiles "" 512 14 200 20 $fontSection ([Theme]::Muted)
+$lblCount.TextAlign = "MiddleRight"
 
-$barCurrent = New-Object GradientBar
-$barCurrent.SetBounds(20, 72, 372, 8)
-$cardCurrent.Controls.Add($barCurrent)
+for ($k = 0; $k -lt $maxRows; $k++) {
+    $y    = 46 + $k * 66
+    $name = if ($k -lt $script:total) { $script:wordFiles[$k].BaseName } else { "" }
 
-$lblElapsed = New-Label $cardCurrent "" 20 92 372 20 $null ([Theme]::Muted)
+    $lblName = New-Label $cardFiles $name 20 $y 460 22 $fontRow ([Theme]::Text)
+    $lblRowStatus = New-Label $cardFiles "" 492 $y 220 22 $fontStatus ([Theme]::Muted)
+    $lblRowStatus.TextAlign = "MiddleRight"
+    $lblInfo = New-Label $cardFiles "" 20 ($y + 26) 692 18 $null ([Theme]::Muted)
+
+    $bar = New-Object GradientBar
+    $bar.SetBounds(20, $y + 50, 692, 8)
+    $cardFiles.Controls.Add($bar)
+
+    $script:rowLabels += $lblRowStatus
+    $script:rowInfo   += $lblInfo
+    $script:rowBars   += $bar
+    if ($k -ge $script:total) { $bar.Visible = $false }
+}
 
 # Log card
 $cardLog = New-Object Card
-$cardLog.SetBounds(24, 462, 412, 174)
+$cardLog.SetBounds(24, 524, 732, 262)
 $form.Controls.Add($cardLog)
 
 $lblSection2 = New-Label $cardLog "LOG" 20 14 200 20 $fontSection ([Theme]::Muted)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.SetBounds(18, 40, 376, 122)
+$txtLog.SetBounds(18, 40, 696, 206)
 $txtLog.Multiline   = $true
 $txtLog.ReadOnly    = $true
 $txtLog.BorderStyle = "None"
 $txtLog.BackColor   = [Theme]::Card
 $txtLog.ForeColor   = [Theme]::Text
 $txtLog.ScrollBars  = "Vertical"
-$txtLog.Font        = New-Object System.Drawing.Font("Consolas", 9)
+$txtLog.Font        = New-Object System.Drawing.Font("Consolas", 9.5)
 $cardLog.Controls.Add($txtLog)
 
 # Close button
 $btnClose = New-Object PillButton
 $btnClose.Text = "Close"
-$btnClose.SetBounds(284, 652, 152, 40)
+$btnClose.SetBounds(592, 800, 160, 44)
 $btnClose.Add_Click({ $form.Close() })
 $form.Controls.Add($btnClose)
 
@@ -368,52 +360,154 @@ function Write-Log($text) {
     $txtLog.AppendText(("[{0}] {1}`r`n" -f (Get-Date -Format "HH:mm:ss"), $text))
 }
 
-function Show-Overall {
-    $ring.Value      = $script:done
-    $ring.Caption    = "$script:done / $script:total"
-    $ring.SubCaption = "documents"
+# An error that escaped a handler: keep the full details in the error log and leave the window usable
+function Write-ErrorReport($exception) {
+    $context = "state=$script:state, document='$script:currentName', done=$script:done of $script:total"
+    Add-Content -Path $errorLog -Encoding UTF8 -Value ("[{0}] {1}`r`n{2}`r`n" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $context, $exception.ToString())
+    if ($script:state -eq "Converting") {
+        if ($script:job) { Stop-Job $script:job -ErrorAction SilentlyContinue; Remove-Job $script:job -Force -ErrorAction SilentlyContinue }
+        $script:job = $null
+        Stop-Word $script:wordPid
+    }
+    Set-Failed "Unexpected error, details in $errorLog"
 }
 
-function Set-Badge($text, $color) {
-    $lblBadge.Text      = $text
-    $lblBadge.ForeColor = $color
+function Show-Overall {
+    $lblCount.Text = "$script:done of $script:total done"
+    Update-RowInfo
+}
+
+# Size and last modified time for each document: the PDF once it exists, otherwise the Word file
+function Update-RowInfo {
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    for ($k = 0; $k -lt [math]::Min($script:total, $maxRows); $k++) {
+        $pdf = Join-Path $pdfFolderPath ($script:wordFiles[$k].BaseName + ".pdf")
+        if (Test-Path $pdf) { $kind = "PDF"; $item = Get-Item $pdf } else { $kind = "Word"; $item = $script:wordFiles[$k] }
+        $script:rowInfo[$k].Text = "{0}   {1:N1} MB   |   {2}" -f $kind, ($item.Length / 1MB), $item.LastWriteTime.ToString("dd-MMM-yyyy HH:mm", $culture)
+    }
 }
 
 function Stop-Word($processId) {
     if ($processId) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }
 }
 
-function Set-Finished($text, $badge, $color) {
+# Sets the status text and bar of one document row. Rows beyond the list are ignored.
+function Set-Row($i, $text, $color, $value, $busy) {
+    if ($i -lt 0 -or $i -ge $script:rowLabels.Count) { return }
+    $script:rowLabels[$i].Text      = $text
+    $script:rowLabels[$i].ForeColor = $color
+    $script:rowBars[$i].Marquee     = $busy
+    if (-not $busy) { $script:rowBars[$i].Value = $value }
+}
+
+function Get-RowIndex($baseName) {
+    for ($k = 0; $k -lt [math]::Min($script:total, $maxRows); $k++) {
+        if ($script:wordFiles[$k].BaseName -eq $baseName) { return $k }
+    }
+    return -1
+}
+
+function Reset-Rows {
+    for ($k = 0; $k -lt [math]::Min($script:total, $maxRows); $k++) {
+        Set-Row $k "Waiting" ([Theme]::Muted) 0 $false
+    }
+}
+
+function Show-LastRun {
+    $text = "never"
+    if (Test-Path $lastRunFile) { $text = (Get-Content $lastRunFile -Raw).Trim() }
+    $lblLastRun.Text = "Last run: $text"
+}
+
+function Save-LastRun {
+    $stamp = (Get-Date).ToString("dd-MMM-yyyy HH:mm", [Globalization.CultureInfo]::InvariantCulture)
+    try {
+        New-Item -ItemType Directory -Force -Path (Split-Path $lastRunFile) | Out-Null
+        Set-Content -Path $lastRunFile -Value $stamp -Encoding UTF8
+    } catch {
+        Write-Log "Could not save the last run time: $($_.Exception.Message)"
+    }
+    Show-LastRun
+}
+
+function Set-Finished($text, $color) {
     $timer.Stop()
-    $barCurrent.Marquee = $false
-    $barCurrent.Value   = 0
-    $lblCurrent.ForeColor = $color
-    $lblCurrent.Text = $text
-    $lblElapsed.Text = ""
-    Set-Badge $badge $color
-    Write-Log $text
+    Save-LastRun
+    for ($k = 0; $k -lt $script:rowBars.Count; $k++) { $script:rowBars[$k].Marquee = $false }
+    $lblStatus.ForeColor = $color
+    $lblStatus.Text      = $text
+    $btnStart.Text       = "Run again"
+    $btnStart.Enabled    = $true
 }
 
 function Set-Failed($text) {
     $script:state = "Failed"
-    Set-Finished $text "FAILED" ([Theme]::Bad)
+    Write-Log $text
+    Set-Finished "Stopped: see the log for details" ([Theme]::Bad)
 }
 
 function Set-Succeeded($text) {
     $script:state = "Finished"
-    Set-Finished $text "DONE" ([Theme]::Good)
+    Write-Log $text
+    Set-Finished $text ([Theme]::Good)
+}
+
+# Reads one line of upload output and moves the matching document row along
+function Write-UploadLine($line) {
+    $text = ("$line" -replace "`r", "").Trim()
+    if (-not $text) { return }
+    Write-Log $text
+
+    if ($text -match "Unchanged: '(.+?)\.pdf'") {
+        Set-Row (Get-RowIndex $matches[1]) "Unchanged" ([Theme]::Muted) 100 $false
+    }
+    if ($text -match "Upload failed for '(.+?)\.pdf'") {
+        Set-Row (Get-RowIndex $matches[1]) "Upload failed" ([Theme]::Bad) 0 $false
+    }
+    if ($text -match "Uploading '(.+?)\.pdf'") {
+        $script:uploadName = $matches[1]
+        Set-Row (Get-RowIndex $script:uploadName) "Uploading" ([Theme]::Accent2) 0 $true
+    }
+    if ($text -match "UPLOADED:") {
+        Set-Row (Get-RowIndex $script:uploadName) "Uploaded" ([Theme]::Good) 100 $false
+    }
+}
+
+# Called by the Start button. Does nothing while a run is already going.
+function Start-Run {
+    if ($script:state -eq "Converting" -or $script:state -eq "Uploading") { return }
+    if ($script:total -eq 0) {
+        $lblStatus.ForeColor = [Theme]::Bad
+        $lblStatus.Text = "No Word documents found in the folder."
+        return
+    }
+
+    $script:next  = 0
+    $script:done  = 0
+    $script:state = "Converting"
+    Reset-Rows
+    Show-Overall
+    $btnStart.Enabled   = $false
+    $btnStart.Text      = "Running..."
+    $lblStatus.ForeColor = [Theme]::Muted
+    $lblStatus.Text     = "Converting $script:total document(s), then uploading to Vercel Blob..."
+    Write-Log "Started."
+    $timer.Start()
+    Start-NextStep
 }
 
 # Starts the next Word export, skipping PDFs that are already up to date. Starts the upload when nothing is left.
 function Start-NextStep {
     while ($script:next -lt $script:total) {
-        $file    = $script:wordFiles[$script:next]
+        $row     = $script:next
+        $file    = $script:wordFiles[$row]
         $pdfPath = Join-Path -Path $pdfFolderPath -ChildPath ($file.BaseName + ".pdf")
         $script:next++
 
         if ((Test-Path $pdfPath) -and -not ($file.LastWriteTime -gt (Get-Item $pdfPath).LastWriteTime)) {
             $script:done++
             Write-Log "[$script:next/$script:total] Skipped '$($file.Name)' (PDF is already up to date)."
+            Set-Row $row "Up to date" ([Theme]::Muted) 100 $false
             Show-Overall
             continue
         }
@@ -424,10 +518,12 @@ function Start-NextStep {
             try {
                 $wordApp = New-Object -ComObject Word.Application
                 $wordApp.Visible = $false
+                $wordApp.DisplayAlerts = 0   # no prompts: a prompt would stop the job with nobody to answer it
 
                 $wordPid = (Get-Process -Name "winword" | Sort-Object -Property StartTime -Descending | Select-Object -First 1).Id
 
-                $doc = $wordApp.Documents.Open($fileFullName)
+                # Read-only, so a document already open in Word (for example, one being edited) does not block the export
+                $doc = $wordApp.Documents.Open($fileFullName, $false, $true)
                 $doc.ExportAsFixedFormat(
                     $pdfPath,
                     17,
@@ -446,6 +542,7 @@ function Start-NextStep {
         } -ArgumentList $file.FullName, $pdfPath
 
         $script:state       = "Converting"
+        $script:currentRow  = $row
         $script:currentName = $file.Name
         $script:currentPdf  = $pdfPath
         $script:jobStart    = Get-Date
@@ -454,10 +551,7 @@ function Start-NextStep {
         $script:idleSeconds = 0
         $script:wordPid     = $null
 
-        $lblCurrent.ForeColor = [Theme]::Text
-        $lblCurrent.Text = "Rendering '$($file.Name)' ($script:next of $script:total)"
-        Set-Badge "RENDERING" ([Theme]::Accent2)
-        $barCurrent.Marquee = $true
+        Set-Row $row "Converting" ([Theme]::Accent2) 0 $true
         Write-Log "[$script:next/$script:total] Rendering '$($file.Name)'..."
         return
     }
@@ -466,14 +560,18 @@ function Start-NextStep {
 }
 
 function Start-Upload {
+    # Documents that are ready for upload wait in the list until their upload line arrives
+    for ($k = 0; $k -lt [math]::Min($script:total, $maxRows); $k++) {
+        $text = $script:rowLabels[$k].Text
+        if ($text -eq "Converted" -or $text -eq "Up to date") { Set-Row $k "Queued" ([Theme]::Muted) 100 $false }
+    }
+
     $bookNames = @($script:wordFiles.BaseName)
     $script:job = Start-Job -FilePath $uploadScript -ArgumentList $pdfFolderPath, $bookNames
     $script:state      = "Uploading"
     $script:jobStart   = Get-Date
-    $lblCurrent.ForeColor = [Theme]::Text
-    $lblCurrent.Text   = "Uploading PDFs to Vercel Blob..."
-    Set-Badge "UPLOADING" ([Theme]::Accent2)
-    $barCurrent.Marquee = $true
+    $script:uploadName = ""
+    $lblStatus.Text    = "Uploading PDFs to Vercel Blob..."
     Write-Log "All documents processed. Uploading to Vercel Blob..."
 }
 
@@ -487,6 +585,7 @@ function Complete-Conversion {
     $script:done++
 
     if ($jobError) {
+        Set-Row $script:currentRow "Failed" ([Theme]::Bad) 0 $false
         Set-Failed "Error processing '$($script:currentName)': $($jobError[0])"
         return
     }
@@ -496,6 +595,7 @@ function Complete-Conversion {
         $sizeInKB = [math]::Round(($pdfInfo.Length / 1KB), 2)
         Write-Log "SUCCESS: Completed '$($pdfInfo.Name)' ($sizeInKB KB) in $elapsed seconds."
     }
+    Set-Row $script:currentRow "Converted" ([Theme]::Good) 100 $false
     Show-Overall
     Start-NextStep
 }
@@ -525,18 +625,24 @@ function Test-WordHealth {
         Remove-Job $script:job -Force -ErrorAction SilentlyContinue
         $script:job = $null
         Stop-Word $script:wordPid
+        Set-Row $script:currentRow "Failed" ([Theme]::Bad) 0 $false
         Set-Failed "CRITICAL ERROR: Background Word instance (PID: $($script:wordPid)) flatlined at 0% CPU while processing $($script:currentName) and was killed."
     }
 }
 
 function Complete-Upload {
     # Flush any log lines the upload wrote after the last tick
-    Receive-Job $script:job -ErrorAction SilentlyContinue |
-        ForEach-Object { if ("$_".Trim()) { Write-Log ("$_" -replace "`r", "") } }
-    $jobError = $script:job.ChildJobs[0].Error
+    Receive-Job $script:job -ErrorAction SilentlyContinue | ForEach-Object { Write-UploadLine $_ }
+    $jobError  = $script:job.ChildJobs[0].Error
     $jobFailed = $script:job.State -eq "Failed"
     Remove-Job $script:job
     $script:job = $null
+
+    # Rows still waiting were not uploaded (for example, no Vercel token)
+    for ($k = 0; $k -lt [math]::Min($script:total, $maxRows); $k++) {
+        $text = $script:rowLabels[$k].Text
+        if ($text -eq "Queued" -or $text -eq "Uploading") { Set-Row $k "Not uploaded" ([Theme]::Muted) 100 $false }
+    }
 
     if ($jobFailed -or $jobError) {
         $reason = if ($jobError) { $jobError[0] } else { "upload job failed" }
@@ -551,18 +657,17 @@ function Complete-Upload {
 function Update-Progress {
     if ($script:state -eq "Converting") {
         if ($script:job.State -eq "Running") {
-            $lblElapsed.Text = "Elapsed: $([int]((Get-Date) - $script:jobStart).TotalSeconds)s"
+            $lblStatus.Text = "Converting '$($script:currentName)'  -  $([int]((Get-Date) - $script:jobStart).TotalSeconds)s"
             Test-WordHealth
         } else {
             Complete-Conversion
         }
     }
     elseif ($script:state -eq "Uploading") {
-        # Show the upload log while it runs
-        Receive-Job $script:job -ErrorAction SilentlyContinue |
-            ForEach-Object { if ("$_".Trim()) { Write-Log ("$_" -replace "`r", "") } }
+        # Show the upload progress row by row while it runs
+        Receive-Job $script:job -ErrorAction SilentlyContinue | ForEach-Object { Write-UploadLine $_ }
         if ($script:job.State -eq "Running") {
-            $lblElapsed.Text = "Elapsed: $([int]((Get-Date) - $script:jobStart).TotalSeconds)s"
+            $lblStatus.Text = "Uploading to Vercel Blob  -  $([int]((Get-Date) - $script:jobStart).TotalSeconds)s"
         } else {
             Complete-Upload
         }
@@ -573,13 +678,18 @@ function Update-Progress {
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 500
-$timer.Add_Tick({ Update-Progress })
+$timer.Add_Tick({
+    try { Update-Progress } catch { Write-ErrorReport $_.Exception }
+})
 
 $form.Add_Shown({
     Show-Overall
+    Show-LastRun
+    $lblStatus.Text = "Ready: $script:total document(s). Press Start to convert and upload."
     Write-Log "Books to PDF: $script:total Word document(s) in '$wordFolderPath'"
-    $timer.Start()
-    Start-NextStep
+    if ($script:total -gt $maxRows) {
+        Write-Log "The list shows the first $maxRows documents; all $script:total are still processed."
+    }
 })
 
 # Closing during a run asks first, then stops the job and the Word instance it started
@@ -603,6 +713,9 @@ $form.Add_FormClosing({
     }
     $timer.Stop()
 })
+
+# Demo mode: define the fake jobs again, so they replace the real Test-WordHealth defined above
+if ($Demo) { . (Join-Path $PSScriptRoot "Demo Fake Jobs.ps1") }
 
 [void]$form.ShowDialog()
 $timer.Dispose()
