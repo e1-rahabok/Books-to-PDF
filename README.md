@@ -57,7 +57,7 @@ Closing the window during a run asks for confirmation. It then stops the job and
 
 ## Running it
 
-- **Desktop icon:** double-click **Books to PDF** on the desktop (console version).
+- **Desktop icon:** double-click **Books to PDF** on the desktop. It opens the progress window with no console. Run `.\Create Desktop Shortcut.ps1` once to create or update it.
 - **Window:**
 
   ```powershell
