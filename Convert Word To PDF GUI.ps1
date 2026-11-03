@@ -632,7 +632,7 @@ function Test-WordHealth {
 
 function Complete-Upload {
     # Flush any log lines the upload wrote after the last tick
-    Receive-Job $script:job -ErrorAction SilentlyContinue | ForEach-Object { Write-UploadLine $_ }
+    Receive-Job $script:job -ErrorAction SilentlyContinue 6>&1 | ForEach-Object { Write-UploadLine $_ }
     $jobError  = $script:job.ChildJobs[0].Error
     $jobFailed = $script:job.State -eq "Failed"
     Remove-Job $script:job
@@ -664,8 +664,9 @@ function Update-Progress {
         }
     }
     elseif ($script:state -eq "Uploading") {
-        # Show the upload progress row by row while it runs
-        Receive-Job $script:job -ErrorAction SilentlyContinue | ForEach-Object { Write-UploadLine $_ }
+        # Show the upload progress row by row while it runs.
+        # The upload script reports with Write-Host, which a job sends to the information stream (6), not the output.
+        Receive-Job $script:job -ErrorAction SilentlyContinue 6>&1 | ForEach-Object { Write-UploadLine $_ }
         if ($script:job.State -eq "Running") {
             $lblStatus.Text = "Uploading to Vercel Blob  -  $([int]((Get-Date) - $script:jobStart).TotalSeconds)s"
         } else {
